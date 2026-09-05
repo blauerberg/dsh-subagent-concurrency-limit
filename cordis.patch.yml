@@ -1,0 +1,8 @@
+# Limit locally executing child-agent turns without counting the root agent.
+- insert:
+    - id: subagent-concurrency-limit
+      name: dsh-subagent-concurrency-limit
+      config:
+        maxConcurrentSubagents: 2
+        subagentToolNames:
+          - subagent

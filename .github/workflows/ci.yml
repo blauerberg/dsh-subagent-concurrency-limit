@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    # Weekly against the latest DeepSeek Harness release.
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ github.sha }}
+    permissions:
+      contents: read
