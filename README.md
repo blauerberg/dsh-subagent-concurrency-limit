@@ -49,7 +49,7 @@ Install the plugin:
 
 ```sh
 dsh plugin --profile web add \
-  github:blauerberg/dsh-subagent-concurrency-limit#73fd6d1cc7e52f0d816c052df3a2f44dd0844d79
+  github:blauerberg/dsh-subagent-concurrency-limit#01182275695067510a187cb05b46df49e5fe812c
 ```
 
 Git installs fetch the source and build `lib/` with the package's `prepare`
@@ -60,7 +60,7 @@ not allowed. Add the revision-specific key to the profile's workspace file
 ```yaml
 # $DSH_HOME/profiles/web/pnpm-workspace.yaml
 allowBuilds:
-  'dsh-subagent-concurrency-limit@https://codeload.github.com/blauerberg/dsh-subagent-concurrency-limit/tar.gz/73fd6d1cc7e52f0d816c052df3a2f44dd0844d79': true
+  'dsh-subagent-concurrency-limit@https://codeload.github.com/blauerberg/dsh-subagent-concurrency-limit/tar.gz/01182275695067510a187cb05b46df49e5fe812c': true
 ```
 
 Save the file, then rerun the install command above. The commit hash used in
