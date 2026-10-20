@@ -123,4 +123,4 @@ The project is licensed under [MIT](LICENSE).
 
 ## Harness compatibility
 
-This version targets DeepSeek Harness `0.2.0-rc.2`.
+The declared compatibility range is DeepSeek Harness `>=0.2.0-rc.2`.

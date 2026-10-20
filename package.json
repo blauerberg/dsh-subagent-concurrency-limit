@@ -45,7 +45,8 @@
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "pnpm": ">=11.7.0"
+    "pnpm": ">=11.7.0",
+    "dsh": ">=0.2.0-rc.2"
   },
   "dsh": {
     "bundle": {
@@ -54,9 +55,9 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-subagent": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-tools": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-agent": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-subagent": ">=0.2.0-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
