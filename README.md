@@ -3,50 +3,34 @@
 Limit how many DeepSeek Harness subagent runs and local child-agent turns run at
 the same time in one process. The root Agent is not counted.
 
-## Why it is needed
-
-In [DeepSeek Harness][dsh-repository] `dsh-v0.1.1-rc.2` (commit
-[`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`][dsh-commit]), the workflow
-engine's [`maxConcurrentAgents` and `maxTotalAgents`][dsh-workflow] apply to
-`agent()` calls inside each workflow run. The standard
-[`subagent` tool][dsh-subagent] has no process-wide limit for root-level direct
-runs outside a workflow. [`maxParallelToolCalls`][dsh-tool-calls] limits the
-dispatch pool for parallel-safe tool calls in one Agent step, not the number of
-background or continuable runs.
-
-This plugin fills that gap by limiting concurrent root delegation admissions and
-local descendant Agent turns in one process.
-
 ## Scope
 
-The plugin limits the delegation tools listed in `subagentToolNames` and local
-Agent turns in the same process where `delegationDepthOf(agent) > 0`. They share
-one process-local pool. The default limit is `2`.
+Configured delegation tools and local Agent turns where
+`delegationDepthOf(agent) > 0` share one process-local pool.
 
-- A root Agent's delegation call waits in FIFO order before creating a child.
-- Add nonstandard delegation tool names to `subagentToolNames`.
-- Nested children that call the same delegation tool also consume the pool. If a
-  permit is available, they take it immediately; when the pool is full, they
-  fail without waiting so a child cannot block the ancestor that is waiting for
-  it.
-- Workflow `agent()` calls and resumed local child turns use the same pool when
-  their Agent turn starts.
-- A permit is released when the child turn becomes idle, the run ends, or the
-  Agent is disposed.
-- Pool waits are bounded: a root delegation call or a resumed local child turn
-  that has been queued for `queueTimeoutMs` (default 300000, five minutes) fails
-  with a clear error instead of waiting forever.
-- A locally published child whose reservation was lost (for example a
-  background job that published outside the delegating call's async context)
-  never queues: it takes a permit immediately when one is free and fails loudly
-  when the pool is full, so it cannot block the ancestor that is waiting for
-  it.
-- For remote-process providers such as Codex, Claude Code, and ACP, only the
-  configured root delegation admission and the observable `subagent/start` and
-  `subagent/end` boundaries are visible. Nested execution and restarts inside
-  the remote process cannot be counted.
-- `maxParallelToolCalls` is independent because it limits tool calls, not live
-  runs.
+- Root delegation calls wait in FIFO order before creating a child.
+- Nested delegation takes a free permit or fails immediately. Waiting could
+  deadlock an ancestor that is collecting the child's result.
+- Local child turns reuse their delegation reservation. Workflow children and
+  resumed turns without a published run enter the same FIFO queue.
+- A published local child without a reservation takes a free permit or fails
+  immediately, because an ancestor may already be waiting for it.
+- Permits are released on idle, run completion, Agent disposal, or a tool
+  failure before child publication. Both thrown errors and error results count.
+- Background jobs retain their reservation until the child is published. When
+  the optional Harness `jobs` service is available, its registration and
+  settlement events release reservations for jobs that end before publication.
+- Remote providers are counted from configured delegation admission through
+  the observable `subagent/end` event. Execution inside a remote process is
+  outside this pool's scope.
+
+Custom delegation tools must publish `subagent/start` in the delegating call's
+async context and pair it with `subagent/end`. A deferred tool that succeeds
+without publishing a child or registering a Harness subagent job keeps its
+reservation until the delegating Agent is disposed.
+
+Pool waits time out after `queueTimeoutMs`. Harness `maxParallelToolCalls`
+controls tool dispatch separately from this pool.
 
 ## Install
 
@@ -72,12 +56,14 @@ Add the plugin configuration to
       - subagent
 ```
 
-`maxConcurrentSubagents` must be a positive safe integer.
-`queueTimeoutMs` must be a positive safe integer; the default is 300000 (five
-minutes), which bounds every pool wait.
-`subagentToolNames` must contain at least one nonempty delegation tool name.
-The bundle patch applies the defaults above; edit the same keys to override
-them.
+| Setting | Default | Accepted values |
+| --- | --- | --- |
+| `maxConcurrentSubagents` | `2` | Positive safe integer |
+| `queueTimeoutMs` | `300000` | Integer from `1` to `2147483647` milliseconds |
+| `subagentToolNames` | `['subagent']` | Nonempty array of nonempty tool names |
+
+The bundle patch applies these defaults. Edit the same keys to override them.
+The timeout maximum is the Node.js timer limit.
 
 Start the profile:
 
@@ -102,6 +88,10 @@ pnpm install
 pnpm run check
 ```
 
+`check` runs lint, typechecks both source and tests, runs the tests, and builds
+`lib/`. CI checks the locked dependencies and the latest Harness release in
+separate jobs.
+
 To inspect the package before publishing:
 
 ```sh
@@ -115,12 +105,8 @@ checks through `prepublishOnly` before publishing to npm.
 
 The project is licensed under [MIT](LICENSE).
 
-[dsh-repository]: https://github.com/deepseek-ai/deepseek-harness
-[dsh-commit]: https://github.com/deepseek-ai/deepseek-harness/tree/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e
-[dsh-workflow]: https://github.com/deepseek-ai/deepseek-harness/blob/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e/packages/workflow/workflow-worker-thread/src/index.ts
-[dsh-subagent]: https://github.com/deepseek-ai/deepseek-harness/blob/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e/packages/subagent/tool-subagent/src/index.ts
-[dsh-tool-calls]: https://github.com/deepseek-ai/deepseek-harness/blob/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e/packages/core/agent-loop/src/tool-calls.ts
-
 ## Harness compatibility
 
-The declared compatibility range is DeepSeek Harness `>=0.2.0-rc.2`.
+The declared compatibility range is DeepSeek Harness `>=0.2.0-rc.2` with Cordis
+`^4.0.4`. The `@deepseek-ai/dsh-jobs` peer is optional; local turns and direct
+runs also work without a jobs service.

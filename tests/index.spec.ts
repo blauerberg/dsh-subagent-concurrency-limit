@@ -1,109 +1,50 @@
 import assert from 'node:assert/strict'
-import { describe, it } from 'node:test'
+import { afterEach, beforeEach, describe, it } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { agentEvents, type Agent, type PreStepDecision } from '@deepseek-ai/dsh-agent'
-import type { ToolDispatchExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ToolDispatchExecution } from '@deepseek-ai/dsh-tools'
 import { apply } from '../src/index.ts'
-
-function mockAgent(id: string, subagentDepth = 0): Agent {
-  return {
-    id,
-    options: { subagentDepth },
-    session: { header: {} },
-    status: 'running',
-  } as unknown as Agent
-}
-
-function status(ctx: Context, agent: Agent, value: 'idle' | 'running'): void {
-  ctx.emit(ctx as never, 'agent/status', { agent, status: value })
-}
-
-function step(
-  ctx: Context,
-  agent: Agent,
-  entered: string[],
-  signal = new AbortController().signal,
-  next: () => Promise<PreStepDecision> = () => {
-    entered.push(String(agent.id))
-    return Promise.resolve({ kind: 'enter', messages: [] })
-  },
-): Promise<PreStepDecision> {
-  status(ctx, agent, 'running')
-  return agentEvents(ctx, agent).waterfall('agent/pre-step', { messages: [], turn: 1, step: 1, signal }, next)
-}
-
-function finishTurn(ctx: Context, agent: Agent): void {
-  status(ctx, agent, 'idle')
-}
-
-interface ToolCallOptions {
-  name?: string
-  signal?: AbortSignal
-  start?: boolean
-  deferStart?: boolean
-  error?: Error
-  local?: boolean
-  childId?: string
-}
-
-function toolCall(
-  ctx: Context,
-  agent: Agent,
-  runId: string,
-  entered: string[],
-  options: ToolCallOptions = {},
-): Promise<ToolExecutionResult> {
-  const exec = {
-    name: options.name ?? 'subagent',
-    agent,
-    signal: options.signal ?? new AbortController().signal,
-  } as ToolDispatchExecution
-  return ctx.waterfall(ctx as never, 'tools/execute', exec, () => {
-    entered.push(runId)
-    if (options.start !== false) {
-      // `deferStart` schedules the publish after the tool returns, like a
-      // background job, while keeping the tool call's async context alive.
-      const emitStart = () => {
-        ctx.emit(ctx as never, 'subagent/start', {
-          runId,
-          provider: options.local === false ? 'remote' : 'spawn',
-          id: options.childId ?? `child-${runId}`,
-          local: options.local !== false,
-        })
-      }
-      if (options.deferStart) setTimeout(emitStart, 0)
-      else emitStart()
-    }
-    if (options.error !== undefined) return Promise.reject(options.error)
-    return Promise.resolve({ isError: false, value: {}, content: [] })
-  })
-}
-
-function startLocalRun(ctx: Context, runId: string, agentId: string): void {
-  ctx.emit(ctx as never, 'subagent/start', {
-    runId,
-    provider: 'spawn',
-    id: agentId,
-    local: true,
-  })
-}
-
-function endRun(ctx: Context, runId: string, local = true): void {
-  ctx.emit(ctx as never, 'subagent/end', {
-    runId,
-    provider: local ? 'spawn' : 'remote',
-    id: `child-${runId}`,
-    local,
-    stopReason: 'completed',
-  })
-}
+import { mockAgent, step, finishTurn, toolCall, startLocalRun, endRun } from './helpers.ts'
 
 describe('subagent concurrency limit', () => {
+  let ctx: Context
+  let root: Agent
+  let entered: string[]
+  beforeEach(() => {
+    ctx = new Context()
+    root = mockAgent('root')
+    entered = []
+  })
+  afterEach(() => ctx.fiber.dispose())
+
+  it('releases an unpublished reservation when the tool returns an error result', async () => {
+    apply(ctx, { maxConcurrentSubagents: 1, queueTimeoutMs: 20 })
+    const result = { isError: true as const, error: { message: 'startup failed' }, content: [] }
+    const exec = { name: 'subagent', agent: root, signal: new AbortController().signal } as ToolDispatchExecution
+
+    assert.equal(await ctx.waterfall(ctx as never, 'tools/execute', exec, async () => result), result)
+    await toolCall(ctx, root, 'after', entered)
+    assert.deepStrictEqual(entered, ['after'])
+    endRun(ctx, 'after')
+  })
+
+  it('rejects queue timeouts above the Node.js timer limit', () => {
+    assert.throws(() => apply(ctx, { queueTimeoutMs: 2_147_483_648 }), /queueTimeoutMs/)
+  })
+
+  it('releases a reserved permit when the child arrives with an aborted signal', async () => {
+    apply(ctx, { maxConcurrentSubagents: 1, queueTimeoutMs: 20 })
+    const child = mockAgent('child', 1)
+    await toolCall(ctx, root, 'initial', entered, { childId: child.id })
+    await assert.rejects(step(ctx, child, entered, AbortSignal.abort(new Error('cancelled'))), /cancelled/)
+    await toolCall(ctx, root, 'next', entered)
+    assert.deepStrictEqual(entered, ['initial', 'next'])
+    endRun(ctx, 'initial')
+    endRun(ctx, 'next')
+  })
+
   it('queues root direct calls before child creation in FIFO order', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 2 })
-    const root = mockAgent('root')
-    const entered: string[] = []
 
     await Promise.all([toolCall(ctx, root, 'first', entered), toolCall(ctx, root, 'second', entered)])
     const third = toolCall(ctx, root, 'third', entered)
@@ -121,11 +62,8 @@ describe('subagent concurrency limit', () => {
   })
 
   it('rejects a saturated nested foreground delegation and makes progress after release', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'root-run', entered, { childId: child.id })
     await step(ctx, child, entered)
@@ -138,13 +76,10 @@ describe('subagent concurrency limit', () => {
   })
 
   it('shares one pool across children and grandchildren without double counting', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 2 })
-    const root = mockAgent('root')
     const childOne = mockAgent('child-one', 1)
     const childTwo = mockAgent('child-two', 1)
     const grandchild = mockAgent('grandchild', 2)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'child-one-run', entered, { childId: childOne.id })
     await toolCall(ctx, root, 'child-two-run', entered, { childId: childTwo.id })
@@ -170,12 +105,9 @@ describe('subagent concurrency limit', () => {
   })
 
   it('limits resumed local non-root turns through the same pool', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
     const other = mockAgent('other', 1)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'initial', entered, { childId: child.id })
     await step(ctx, child, entered)
@@ -198,28 +130,22 @@ describe('subagent concurrency limit', () => {
   })
 
   it('limits remote runs at their observable lifecycle boundary', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'remote', entered, { local: false })
     const waiting = toolCall(ctx, root, 'next', entered)
     await Promise.resolve()
     assert.deepStrictEqual(entered, ['remote'])
 
-    endRun(ctx, 'remote', false)
+    endRun(ctx, 'remote')
     await waiting
     assert.deepStrictEqual(entered, ['remote', 'next'])
     endRun(ctx, 'next')
   })
 
   it('does not count the root agent turn', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
 
     await Promise.all([step(ctx, root, entered), step(ctx, child, entered)])
     assert.ok(entered.includes('root'))
@@ -228,10 +154,7 @@ describe('subagent concurrency limit', () => {
   })
 
   it('releases a permit when a direct call ends without starting a run', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
-    const entered: string[] = []
     const error = new Error('delegation failed before start')
 
     await assert.rejects(toolCall(ctx, root, 'failed', entered, { start: false, error }), (thrown) => thrown === error)
@@ -241,10 +164,7 @@ describe('subagent concurrency limit', () => {
   })
 
   it('removes an aborted root-call waiter without consuming a permit', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
-    const entered: string[] = []
     const abort = new AbortController()
 
     await toolCall(ctx, root, 'active', entered)
@@ -262,10 +182,7 @@ describe('subagent concurrency limit', () => {
   })
 
   it('releases a permit when a waiter is aborted immediately after admission', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
-    const entered: string[] = []
     const abort = new AbortController()
 
     await toolCall(ctx, root, 'active', entered)
@@ -282,11 +199,8 @@ describe('subagent concurrency limit', () => {
   })
 
   it('releases a local child permit on disposal', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'child', entered, { childId: child.id })
     await step(ctx, child, entered)
@@ -299,11 +213,9 @@ describe('subagent concurrency limit', () => {
   })
 
   it('releases a permit when a local pre-step fails', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
     const child = mockAgent('child', 1)
     const other = mockAgent('other', 1)
-    const entered: string[] = []
     const error = new Error('pre-step failed')
 
     await assert.rejects(
@@ -316,11 +228,8 @@ describe('subagent concurrency limit', () => {
   })
 
   it('re-admits a root-reserved local child after its first pre-step fails', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
     const error = new Error('first child step failed')
 
     await toolCall(ctx, root, 'initial', entered, { childId: child.id })
@@ -340,10 +249,7 @@ describe('subagent concurrency limit', () => {
   })
 
   it('only gates configured delegation tool names', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1, subagentToolNames: ['delegate'] })
-    const root = mockAgent('root')
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'active', entered, { name: 'delegate' })
     await toolCall(ctx, root, 'other', entered, { name: 'other' })
@@ -353,15 +259,11 @@ describe('subagent concurrency limit', () => {
   })
 
   it('rejects a root-call queue wait after queueTimeoutMs', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1, queueTimeoutMs: 50 })
-    const root = mockAgent('root')
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'active', entered)
     await assert.rejects(toolCall(ctx, root, 'queued', entered), /queue timeout after 50ms/)
 
-    // The timed-out waiter consumes no permit: the next call enters immediately.
     endRun(ctx, 'active')
     await toolCall(ctx, root, 'next', entered)
     assert.deepStrictEqual(entered, ['active', 'next'])
@@ -369,11 +271,8 @@ describe('subagent concurrency limit', () => {
   })
 
   it('rejects a resumed child turn queue wait after queueTimeoutMs', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1, queueTimeoutMs: 50 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'initial', entered, { childId: child.id })
     await step(ctx, child, entered)
@@ -389,20 +288,14 @@ describe('subagent concurrency limit', () => {
   })
 
   it('keeps the reservation for a deferred job publish and admits the child first turn', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'job-run', entered, { deferStart: true, childId: child.id })
     const queued = toolCall(ctx, root, 'queued', entered)
-    // The tool has already returned; the deferred publish fires on the next timer.
     await new Promise((resolve) => setTimeout(resolve, 0))
     assert.deepStrictEqual(entered, ['job-run'])
 
-    // The publish bound the retained reservation, so the child's first pre-step
-    // passes even though the pool is full and a root call is queued.
     await step(ctx, child, entered)
     assert.deepStrictEqual(entered, ['job-run', 'child'])
 
@@ -414,14 +307,10 @@ describe('subagent concurrency limit', () => {
   })
 
   it('fails loudly for a reservation-less local run when the pool is full', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
     const child = mockAgent('child', 1)
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'active', entered)
-    // No tool call at all: the publish lost the reservation (lost ALS store).
     startLocalRun(ctx, 'orphan', child.id)
     await assert.rejects(step(ctx, child, entered), /exhausted for reservation-less local child turn/)
 
@@ -433,10 +322,7 @@ describe('subagent concurrency limit', () => {
   })
 
   it('releases an unbound reservation when the delegating parent is disposed', async () => {
-    const ctx = new Context()
     apply(ctx, { maxConcurrentSubagents: 1 })
-    const root = mockAgent('root')
-    const entered: string[] = []
 
     await toolCall(ctx, root, 'held', entered, { start: false })
     const queued = toolCall(ctx, root, 'queued', entered)
@@ -452,7 +338,7 @@ describe('subagent concurrency limit', () => {
   for (const maxConcurrentSubagents of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     it(`rejects invalid maxConcurrentSubagents ${maxConcurrentSubagents}`, () => {
       assert.throws(() => {
-        apply(new Context(), { maxConcurrentSubagents })
+        apply(ctx, { maxConcurrentSubagents })
       }, /maxConcurrentSubagents must be a positive safe integer/)
     })
   }
@@ -460,15 +346,15 @@ describe('subagent concurrency limit', () => {
   for (const queueTimeoutMs of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     it(`rejects invalid queueTimeoutMs ${queueTimeoutMs}`, () => {
       assert.throws(() => {
-        apply(new Context(), { queueTimeoutMs })
-      }, /queueTimeoutMs must be a positive safe integer/)
+        apply(ctx, { queueTimeoutMs })
+      }, /queueTimeoutMs must be an integer from 1 to 2147483647/)
     })
   }
 
   for (const subagentToolNames of [[], [''], ['subagent', '']]) {
     it(`rejects invalid subagentToolNames ${JSON.stringify(subagentToolNames)}`, () => {
       assert.throws(() => {
-        apply(new Context(), { subagentToolNames })
+        apply(ctx, { subagentToolNames })
       }, /subagentToolNames must contain at least one non-empty string/)
     })
   }

@@ -3,6 +3,7 @@
     "strict": true,
     "target": "ES2022",
     "module": "NodeNext",
+    "rewriteRelativeImportExtensions": true,
     "lib": ["ES2022"],
     "rootDir": "src",
     "outDir": "lib",

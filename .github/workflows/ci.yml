@@ -19,3 +19,10 @@ jobs:
       ref: ${{ github.sha }}
     permissions:
       contents: read
+  compatibility:
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ github.sha }}
+      latest-dsh: true
+    permissions:
+      contents: read

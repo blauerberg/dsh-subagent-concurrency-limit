@@ -6,6 +6,10 @@ on:
       ref:
         required: false
         type: string
+      latest-dsh:
+        description: Check the latest Harness release instead of the locked dependencies
+        type: boolean
+        default: false
     outputs:
       dsh_ref:
         description: DeepSeek Harness release used by the checks
@@ -41,10 +45,8 @@ jobs:
       - name: Check whitespace
         run: git diff --check
 
-      - name: Check formatting and lint
-        run: pnpm run lint
-
       - name: Resolve latest DeepSeek Harness release
+        if: inputs.latest-dsh
         id: dsh-release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,15 +60,10 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Install selected DeepSeek Harness packages
+        if: inputs.latest-dsh
         run: |
           node .github/set-dsh-version.mjs "${{ steps.dsh-release.outputs.ref }}"
           pnpm install --no-frozen-lockfile
 
-      - name: Run typecheck
-        run: pnpm run typecheck
-
-      - name: Run unit tests
-        run: pnpm run test
-
-      - name: Build distribution
-        run: pnpm run build
+      - name: Check plugin
+        run: pnpm run check
